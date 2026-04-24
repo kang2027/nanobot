@@ -88,6 +88,31 @@ class GenerationSettings:
 _SYNTHETIC_USER_CONTENT = "(conversation continued)"
 
 
+def _carry_over_reasoning(
+    src: dict[str, Any],
+    dst: dict[str, Any],
+) -> None:
+    """Merge ``reasoning_content`` from *src* into *dst*.
+
+    When ``_enforce_role_alternation`` merges consecutive assistant
+    messages, the ``reasoning_content`` field (used by DeepSeek-R1 /
+    DeepSeek-V4 thinking mode and others) must be preserved.  If both
+    messages carry reasoning, the texts are joined; if only one does,
+    its value is kept.
+    """
+    src_rc = src.get("reasoning_content")
+    dst_rc = dst.get("reasoning_content")
+    # Guard: reasoning_content is always str | None in practice.
+    if not isinstance(src_rc, str):
+        src_rc = None
+    if not isinstance(dst_rc, str):
+        dst_rc = None
+    if src_rc and dst_rc:
+        dst["reasoning_content"] = (dst_rc + "\n\n" + src_rc).strip()
+    elif src_rc:
+        dst["reasoning_content"] = src_rc
+
+
 class LLMProvider(ABC):
     """Base class for LLM providers."""
 
@@ -392,16 +417,24 @@ class LLMProvider(ABC):
                     prev_has_tools = bool(prev.get("tool_calls"))
                     curr_has_tools = bool(msg.get("tool_calls"))
                     if curr_has_tools:
-                        merged[-1] = dict(msg)
+                        replacement = dict(msg)
+                        _carry_over_reasoning(prev, replacement)
+                        merged[-1] = replacement
                         continue
                     if prev_has_tools:
+                        _carry_over_reasoning(msg, prev)
                         continue
                 prev_content = prev.get("content") or ""
                 curr_content = msg.get("content") or ""
                 if isinstance(prev_content, str) and isinstance(curr_content, str):
                     prev["content"] = (prev_content + "\n\n" + curr_content).strip()
+                    if role == "assistant":
+                        _carry_over_reasoning(msg, prev)
                 else:
-                    merged[-1] = dict(msg)
+                    replacement = dict(msg)
+                    if role == "assistant":
+                        _carry_over_reasoning(prev, replacement)
+                    merged[-1] = replacement
             else:
                 merged.append(dict(msg))
 
@@ -420,6 +453,10 @@ class LLMProvider(ABC):
         ):
             recovered = dict(last_popped)
             recovered["role"] = "user"
+            # Strip assistant-only fields that have no meaning on a user message.
+            recovered.pop("reasoning_content", None)
+            recovered.pop("thinking_blocks", None)
+            recovered.pop("tool_calls", None)
             merged.append(recovered)
 
         # Safety net: ensure the first non-system message is not a bare

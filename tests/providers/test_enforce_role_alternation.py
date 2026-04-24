@@ -238,3 +238,108 @@ class TestEnforceRoleAlternation:
         result = LLMProvider._enforce_role_alternation(msgs)
         assert result[1]["role"] == "user"
         assert result[1]["content"] == "hello"
+
+    # ---- reasoning_content preservation (DeepSeek-R1 / V4 thinking) ----
+
+    def test_merge_preserves_reasoning_content_from_earlier(self):
+        """When two plain assistant messages merge, earlier reasoning_content is kept."""
+        msgs = [
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": "A", "reasoning_content": "think-A"},
+            {"role": "assistant", "content": "B"},
+            {"role": "user", "content": "Next"},
+        ]
+        result = LLMProvider._enforce_role_alternation(msgs)
+        assert len(result) == 3
+        assert result[1]["reasoning_content"] == "think-A"
+
+    def test_merge_preserves_reasoning_content_from_later(self):
+        """When two plain assistant messages merge, later reasoning_content is carried over."""
+        msgs = [
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": "A"},
+            {"role": "assistant", "content": "B", "reasoning_content": "think-B"},
+            {"role": "user", "content": "Next"},
+        ]
+        result = LLMProvider._enforce_role_alternation(msgs)
+        assert len(result) == 3
+        assert result[1]["reasoning_content"] == "think-B"
+
+    def test_merge_concatenates_both_reasoning_contents(self):
+        """When both messages have reasoning_content, they are joined."""
+        msgs = [
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": "A", "reasoning_content": "think-A"},
+            {"role": "assistant", "content": "B", "reasoning_content": "think-B"},
+            {"role": "user", "content": "Next"},
+        ]
+        result = LLMProvider._enforce_role_alternation(msgs)
+        assert len(result) == 3
+        assert "think-A" in result[1]["reasoning_content"]
+        assert "think-B" in result[1]["reasoning_content"]
+
+    def test_tool_call_replacement_carries_over_reasoning(self):
+        """Earlier reasoning_content survives when the later message has tool_calls."""
+        msgs = [
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": "A", "reasoning_content": "think-A"},
+            {"role": "assistant", "content": None, "tool_calls": [{"id": "1"}], "reasoning_content": "think-B"},
+            {"role": "tool", "content": "result1", "tool_call_id": "1"},
+            {"role": "user", "content": "Next"},
+        ]
+        result = LLMProvider._enforce_role_alternation(msgs)
+        asst = [m for m in result if m["role"] == "assistant"][0]
+        assert asst["tool_calls"] == [{"id": "1"}]
+        # Both reasoning contents should be preserved.
+        assert "think-A" in asst["reasoning_content"]
+        assert "think-B" in asst["reasoning_content"]
+
+    def test_prev_tool_call_skips_curr_but_carries_reasoning(self):
+        """When prev has tool_calls, curr is skipped but its reasoning_content is preserved."""
+        msgs = [
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": None, "tool_calls": [{"id": "1"}]},
+            {"role": "assistant", "content": "B", "reasoning_content": "think-B"},
+            {"role": "tool", "content": "result1", "tool_call_id": "1"},
+            {"role": "user", "content": "Next"},
+        ]
+        result = LLMProvider._enforce_role_alternation(msgs)
+        asst = [m for m in result if m["role"] == "assistant"][0]
+        assert asst["tool_calls"] == [{"id": "1"}]
+        assert asst["reasoning_content"] == "think-B"
+
+    def test_non_string_merge_carries_over_reasoning(self):
+        """When content is non-string, replacement carries earlier reasoning."""
+        msgs = [
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": [{"type": "text", "text": "A"}], "reasoning_content": "think-A"},
+            {"role": "assistant", "content": "B"},
+            {"role": "user", "content": "Next"},
+        ]
+        result = LLMProvider._enforce_role_alternation(msgs)
+        asst = [m for m in result if m["role"] == "assistant"][0]
+        assert asst["reasoning_content"] == "think-A"
+
+    def test_empty_string_reasoning_does_not_overwrite_nonempty(self):
+        """Empty-string reasoning_content should not overwrite existing non-empty."""
+        msgs = [
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": "A", "reasoning_content": "think-A"},
+            {"role": "assistant", "content": "B", "reasoning_content": ""},
+            {"role": "user", "content": "Next"},
+        ]
+        result = LLMProvider._enforce_role_alternation(msgs)
+        asst = [m for m in result if m["role"] == "assistant"][0]
+        assert asst["reasoning_content"] == "think-A"
+
+    def test_trailing_assistant_recovery_strips_reasoning_content(self):
+        """Recovered user message should not carry reasoning_content or tool_calls."""
+        msgs = [
+            {"role": "system", "content": "sys"},
+            {"role": "assistant", "content": "result", "reasoning_content": "secret"},
+        ]
+        result = LLMProvider._enforce_role_alternation(msgs)
+        assert len(result) == 2
+        assert result[1]["role"] == "user"
+        assert "reasoning_content" not in result[1]
+        assert "tool_calls" not in result[1]
